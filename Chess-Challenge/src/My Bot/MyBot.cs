@@ -5,203 +5,145 @@ using ChessChallenge.API;
 
 public class MyBot : IChessBot
 {
-    private readonly Random _random;
-
-    int prev = 0;
+    private readonly IMonteCarlo _mcts;
 
     public MyBot()
     {
-        _random = new Random();
+        _mcts = new BasicMonteCarlo();
     }
-
-    IDictionary<ulong, int> zobrist;
-
-    int evals = 0;
 
     public Move Think(Board board, Timer timer)
     {
-        Move[] moves = board.GetLegalMoves();
+        _mcts.Initialize(board);
+        _mcts.MCTS(timer, 2000);
+        return _mcts.GetBestMove();
+    }
+}
 
-        ValueMove[] valueMoves = moves.OrderBy(a => Guid.NewGuid()).Select(a => new ValueMove() {value = 0, move = a}).ToArray();
+public interface IMonteCarlo
+{
+    void Initialize(Board board);
 
-        zobrist = new Dictionary<ulong, int>();
-        evals=0;
+    void MCTS(Timer timer, int limit);
 
-        for(int i = 0; i < valueMoves.Length && timer.MillisecondsElapsedThisTurn < 20000; i++ )
-        {
-            for(int  j = 0; j < 100; j++)
-            {
-                int result = DoMonteCarlo(board);
-                valueMoves[i].value += result;
-                if(result == 1)
-                    valueMoves[i].result.whiteWon++;
-                
-                if(result == -1)
-                    valueMoves[i].result.blackWon++;
+    Move GetBestMove();
+}
 
-                if(result == 0)
-                    valueMoves[i].result.Draw++;
-            }
-        }
-        
-        if(board.IsWhiteToMove)
-            valueMoves = valueMoves.OrderByDescending(a => a.value).ToArray();
-        else
-            valueMoves = valueMoves.OrderBy(a => a.value).ToArray();
+public class BasicMonteCarlo : IMonteCarlo
+{
+    private GameTreeNode Root { get; set; }
 
-        foreach(ValueMove move in valueMoves)
-        {
-            Console.WriteLine($"Move {move.move.ToString()}: {move.value} ({move.result.whiteWon}|-{move.result.blackWon}|={move.result.Draw})");
-        }
-        Console.WriteLine($"---------------------evals: {evals}");
+    private Board Board { get; set; }
 
-        return valueMoves[0].move;
+    public BasicMonteCarlo()
+    {
+
     }
 
-    int DoMonteCarlo(Board board)
+    public void Initialize(Board board)
     {
-        if(board.IsDraw())
-            return 0;
-        if(board.IsInCheckmate())
-            return board.IsWhiteToMove ? -1 : 1;
+        Board = board;
 
-        Move[] moves = board.GetLegalMoves();
-        
-        var valueMoves = moves.OrderBy(a => Guid.NewGuid()).Select(a => 
+        if(Root == null)
+        {
+            Root = new GameTreeNode() {
+                Move = new Move(),
+                Children = new Dictionary<Move, GameTreeNode>()
+            };
+            return;
+        }
+
+        Move[] previousMoves = board.GameMoveHistory;
+
+        Root = Root.Children[previousMoves[previousMoves.Length - 2]].Children[previousMoves[previousMoves.Length - 1]];
+    }
+
+    public void MCTS(Timer timer, int limit)
+    {
+        while(timer.MillisecondsElapsedThisTurn < limit)
+        {
+            // Select the best node
+            GameTreeNode node = Selection();
+            
+
+            // Move the Board state to the node by following its parents
+
+            GameTreeNode parent = node.Parent;
+            Stack<Move> moves = new Stack<Move>();
+            while(parent != null)
             {
-                board.MakeMove(a);
-                int value = GetBoardValue(board);
-                board.UndoMove(a);
-                return new ValueMove() { move = a, value = value };
+                moves.Push(parent.Move);
+                parent = node.Parent;
+            }
+            foreach(Move move in moves)
+            {
+                Board.MakeMove(move);
+            }
+
+            // Expansion
+            Expansion(node, Board);
+
+
+            
+        }
+
+    }
+
+    protected GameTreeNode Selection()
+    {
+        GameTreeNode node = Root;
+
+        while(node.Children.Count > 0 && !node.Children.Any(node => node.Value.Children == null))
+        {
+            node = SelectBestChild(node);
+        }
+
+        if(node.Children.Count > 0)
+            node = SelectBestChild(node);
+
+        return node;
+    }
+
+    protected GameTreeNode SelectBestChild(GameTreeNode node)
+    {
+        return node.Children.OrderBy(_ => Guid.NewGuid()).First().Value;
+    }
+
+    protected GameTreeNode Expansion(GameTreeNode selection, Board board)
+    {
+        selection.Children = new Dictionary<Move, GameTreeNode>();
+        foreach(Move move in board.GetLegalMoves())
+        {
+            selection.Children.Add(move, new GameTreeNode()
+            {
+                Parent = selection,
+                Move = move,
+                Children = new Dictionary<Move, GameTreeNode>()
             });
-
-        if(board.IsWhiteToMove)
-            valueMoves.OrderByDescending(a => a.value);
-        else 
-            valueMoves.OrderBy(a => a.value);
-
-        Move newMove = valueMoves.ToArray()[_random.Next(0, Math.Min(4, moves.Length))].move;
-        board.MakeMove(newMove);
-        int returnValue = DoMonteCarlo(board);
-        board.UndoMove(newMove);
-
-        return returnValue;
-    }
-
-    int GetBoardValue(Board board, int depth = 0, int alpha = int.MinValue, int beta = int.MaxValue)
-    {
-        if(depth == 3)
-            return GetBoardPieceValue(board);
-        
-        if(board.IsInCheckmate())
-            return board.IsWhiteToMove ? 50000 : -50000;
-        
-        if(board.IsDraw())
-            return 0;
-        
-        int value = 0;
-        if(board.IsWhiteToMove)
-        {
-            value = int.MinValue;
-            foreach(Move move in board.GetLegalMoves())
-            {
-                board.MakeMove(move);
-                value = Math.Max(value, GetBoardValue(board, depth + 1, alpha, beta));
-                board.UndoMove(move);
-                if(value > beta)
-                    break;
-                alpha = Math.Max(value, alpha);
-            }
-        } 
-        else
-        {
-            value = int.MaxValue;
-            foreach(Move move in board.GetLegalMoves())
-            {
-                board.MakeMove(move);
-                value = Math.Min(value, GetBoardValue(board, depth + 1));
-                board.UndoMove(move);
-
-                if(value < alpha)
-                    break;
-                beta = Math.Min(value, beta);
-            }
         }
 
-        return value;
+        return selection;
     }
 
-    int GetBoardPieceValue(Board board)
+    protected GameTreeNode Simulation(GameTreeNode expansion)
     {
-        evals++;
-        ulong zobristKey = board.ZobristKey;
-        if(zobrist.ContainsKey(zobristKey))
-            return zobrist[zobristKey];
-
-        int value = 0;
-        value += board.GetPieceList(PieceType.Pawn, true).Count * 1;
-        value += board.GetPieceList(PieceType.Knight, true).Count * 3;
-        value += board.GetPieceList(PieceType.Bishop, true).Count * 3;
-        value += board.GetPieceList(PieceType.Rook, true).Count * 5;
-        value += board.GetPieceList(PieceType.Queen, true).Count * 9;
-        value += board.GetPieceList(PieceType.King, true).Count * 100000;
-
-        value -= board.GetPieceList(PieceType.Pawn, false).Count * 1;
-        value -= board.GetPieceList(PieceType.Knight, false).Count * 3;
-        value -= board.GetPieceList(PieceType.Bishop, false).Count * 3;
-        value -= board.GetPieceList(PieceType.Rook, false).Count * 5;
-        value -= board.GetPieceList(PieceType.Queen, false).Count * 9;
-        value -= board.GetPieceList(PieceType.King, false).Count * 100000;
-
-        zobrist.Add(zobristKey, value);
-
-        return value;
+        return expansion;
     }
 
-    int getPieceValue(Piece piece)
+    public Move GetBestMove()
     {
-        int value = 0;
-        switch(piece.PieceType)
-        {
-            case PieceType.Pawn:
-                value = 1;
-                break;
-            case PieceType.Rook:
-                value = 5;
-                break;
-            case PieceType.Bishop:
-                value = 3;
-                break;
-            case PieceType.Knight:
-                value = 2;
-                break;
-            case PieceType.Queen:
-                value = 9;
-                break;
-            case PieceType.King:
-                value = 5000;
-                break;
-            default:
-                value = 0;
-                break;
-        }            
-
-        return (piece.IsWhite ? 1 : -1) * value;
+        return Root.Children.OrderByDescending(node => node.Value.Sims).First().Value.Move;
     }
 }
 
-struct ValueMove
+public class GameTreeNode
 {
-    public Move move;
-    public int value;
+    public Move Move { get; set; }
 
-    public Simresults result;
-}
+    public GameTreeNode Parent { get; set; }
 
-struct Simresults
-{
-    public int whiteWon;
-    public int blackWon;
+    public int Wins { get; set; } = 0;
+    public int Sims { get; set; } = 0;
 
-    public int Draw;
+    public Dictionary<Move, GameTreeNode> Children { get; set; }
 }
