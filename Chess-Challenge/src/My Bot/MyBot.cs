@@ -5,40 +5,28 @@ using ChessChallenge.API;
 
 public class MyBot : IChessBot
 {
-    private readonly IMonteCarlo _mcts;
+    private readonly MonteCarlo _mcts;
 
     public MyBot()
     {
-        _mcts = new BasicMonteCarlo();
+        _mcts = new MonteCarlo();
     }
 
     public Move Think(Board board, Timer timer)
     {
         _mcts.Initialize(board);
-        _mcts.MCTS(timer, 500);
+        _mcts.MCTS(timer, 750);
         return _mcts.GetBestMove();
     }
 }
 
-public interface IMonteCarlo
-{
-    void Initialize(Board board);
-
-    void MCTS(Timer timer, int limit);
-
-    Move GetBestMove();
-}
-
-public class BasicMonteCarlo : IMonteCarlo
+public class MonteCarlo
 {
     private GameTreeNode Root { get; set; }
 
     private Board Board { get; set; }
 
-    public BasicMonteCarlo()
-    {
-
-    }
+    private readonly static int[] _values = { 0, 100, 300, 300, 500, 900, 500000 };
 
     public void Initialize(Board board)
     {
@@ -146,19 +134,36 @@ public class BasicMonteCarlo : IMonteCarlo
 
             Board.MakeMove(child.Move);
 
-            value += Board.GetPieceList(PieceType.Pawn, true).Count * 100 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Knight, true).Count * 300 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Bishop, true).Count * 300 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Rook, true).Count * 500 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Queen, true).Count * 900 * valueFlipper;
-            value += Board.GetPieceList(PieceType.King, true).Count * 50000 * valueFlipper;
+            if(Board.IsInCheckmate())
+            {
+                best = child;
+                Board.UndoMove(child.Move);
+                break;
+            }
+            if(Board.IsDraw())
+            {
+                value = 0;
+                Board.UndoMove(child.Move);
+                continue;
+            }
 
-            value += Board.GetPieceList(PieceType.Pawn, false).Count * -100 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Knight, false).Count * -300 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Bishop, false).Count * -300 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Rook, false).Count * -500 * valueFlipper;
-            value += Board.GetPieceList(PieceType.Queen, false).Count * -900 * valueFlipper;
-            value += Board.GetPieceList(PieceType.King, false).Count * -50000 * valueFlipper;
+            Stack<Move> rewindCaptures = new Stack<Move>();
+            Move[] movesWithCaptures = Board.GetLegalMoves(true);
+            while(movesWithCaptures.Length > 0)
+            {
+                Move leastValueableCapture = movesWithCaptures.OrderBy(move => move.MovePieceType - move.CapturePieceType).First();
+                Board.MakeMove(leastValueableCapture);
+                rewindCaptures.Push(leastValueableCapture);
+                movesWithCaptures = Board.GetLegalMoves(true);
+            }
+
+            foreach(PieceList pieces in Board.GetAllPieceLists())
+                value += pieces.Count * (pieces.IsWhitePieceList ? 1 : -1) * _values[(int)pieces.TypeOfPieceInList] * valueFlipper;
+
+            foreach(Move rewindCapture in rewindCaptures)
+            {
+                Board.UndoMove(rewindCapture);
+            }
 
             Board.UndoMove(child.Move);
 
