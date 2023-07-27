@@ -15,7 +15,7 @@ public class MyBot : IChessBot
     public Move Think(Board board, Timer timer)
     {
         _mcts.Initialize(board);
-        _mcts.MCTS(timer, 750);
+        _mcts.MCTS(timer, 500);
         return _mcts.GetBestMove();
     }
 }
@@ -43,7 +43,18 @@ public class MonteCarlo
 
         Move[] previousMoves = board.GameMoveHistory;
 
-        Root = Root.Children[previousMoves[previousMoves.Length - 2]].Children[previousMoves[previousMoves.Length - 1]];
+        try
+        {
+            Root = Root.Children[previousMoves[previousMoves.Length - 2]].Children[previousMoves[previousMoves.Length - 1]];
+        }
+        catch
+        {
+            Root = new GameTreeNode() {
+                Move = previousMoves[previousMoves.Length - 1],
+                Children = new Dictionary<Move, GameTreeNode>()
+            };
+        }
+        
         Root.Parent = null;
 
         // The Board will need to be rewinded one step back, so that MCTS will traverse the move stack properly from the Root move
@@ -52,16 +63,17 @@ public class MonteCarlo
 
     public void MCTS(Timer timer, int limit)
     {
+        int sims = Root.Sims;
         while(timer.MillisecondsElapsedThisTurn < limit)
-        //while(true)
+        // /while(true)
         {
+            sims += 1;
             // Select the best node
-            GameTreeNode node = Selection();
+            GameTreeNode node = Selection(sims);
             
 
             // Move the Board state to the node by following its parents
             Stack<Move> moves = new Stack<Move>();
-            moves.Push(node.Move);
             GameTreeNode? parent = node.Parent;
             while(parent != null)
             {
@@ -73,15 +85,15 @@ public class MonteCarlo
                 Board.MakeMove(move);
             }
 
-            // Expansion
-            Expansion(node, Board);
-
+            if(node.Sims > 0)
+            {
+                Board.MakeMove(node.Move);
+                node = Expansion(node, Board);
+            }
             Simulation(node, Board);
-
             Backpropagate(node);
 
             // Reset the board
-            Board.UndoMove(node.Move);
             parent = node.Parent;
             while(parent != null)
             {
@@ -90,120 +102,59 @@ public class MonteCarlo
             }   
         }
 
+        foreach(GameTreeNode child in Root.Children.Values.OrderByDescending(node => node.Sims))
+        {
+            Console.WriteLine($"Move {child.Move}: Sims {child.Sims}, Wins: {child.Wins}, Value: {child.Value}");
+        }
+
     }
 
-    protected GameTreeNode Selection()
+    protected GameTreeNode Selection(int totalSims)
     {
         GameTreeNode node = Root;
 
-        while(node.Children.Count > 0 && !node.Children.Any(node => node.Value.Sims == 0))
+        while(node.Children.Count > 0)
         {
-            node = SelectBestChild(node);
+            node = node.Children.MaxBy(child => CalculateUcb(child.Value, totalSims)).Value;
         }
-
-        if(node.Children.Count > 0)
-            node = SelectBestChild(node);
 
         return node;
     }
 
-    protected GameTreeNode SelectBestChild(GameTreeNode node)
+    protected static double CalculateUcb(GameTreeNode node, int totalSims)
     {
-        // Move the Board state to the node by following its parents
-        Stack<Move> moves = new Stack<Move>();
-        moves.Push(node.Move);
-        GameTreeNode? parent = node.Parent;
-        while(parent != null)
-        {
-            moves.Push(parent.Move);
-            parent = parent.Parent;
-        }
-        foreach(Move move in moves)
-        {
-            Board.MakeMove(move);
-        }
-
-        GameTreeNode best = null!;
-        int bestValue = int.MinValue;
-        GameTreeNode[] nodes = node.Children.OrderBy(_ => Guid.NewGuid()).Select(n => n.Value).ToArray();
-        int valueFlipper = Board.IsWhiteToMove ? 1 : -1;
-
-        foreach(GameTreeNode child in nodes)
-        {
-            int value = 0;
-
-            Board.MakeMove(child.Move);
-
-            if(Board.IsInCheckmate())
-            {
-                best = child;
-                Board.UndoMove(child.Move);
-                break;
-            }
-            if(Board.IsDraw())
-            {
-                value = 0;
-                Board.UndoMove(child.Move);
-                continue;
-            }
-
-            Stack<Move> rewindCaptures = new Stack<Move>();
-            Move[] movesWithCaptures = Board.GetLegalMoves(true);
-            while(movesWithCaptures.Length > 0)
-            {
-                Move leastValueableCapture = movesWithCaptures.OrderBy(move => move.MovePieceType - move.CapturePieceType).First();
-                Board.MakeMove(leastValueableCapture);
-                rewindCaptures.Push(leastValueableCapture);
-                movesWithCaptures = Board.GetLegalMoves(true);
-            }
-
-            foreach(PieceList pieces in Board.GetAllPieceLists())
-                value += pieces.Count * (pieces.IsWhitePieceList ? 1 : -1) * _values[(int)pieces.TypeOfPieceInList] * valueFlipper;
-
-            foreach(Move rewindCapture in rewindCaptures)
-            {
-                Board.UndoMove(rewindCapture);
-            }
-
-            Board.UndoMove(child.Move);
-
-            if(value > bestValue)
-            {
-                best = child;
-                bestValue = value;
-            }
-        }
-
-        // Reset the board
-        Board.UndoMove(node.Move);
-        parent = node.Parent;
-        while(parent != null)
-        {
-            Board.UndoMove(parent.Move);
-            parent = parent.Parent;
-        }   
-
-        return best;
+        var value = node.Wins / Math.Max(1.0, node.Sims) + 20 * Sigmoid(0.00005 * node.Value * Math.Sqrt( Math.Log(totalSims) / Math.Max(0.00000000001, node.Sims)));
+        return value;
     }
 
     protected GameTreeNode Expansion(GameTreeNode selection, Board board)
     {
-        selection.Children = new Dictionary<Move, GameTreeNode>();
         foreach(Move move in board.GetLegalMoves())
         {
-            selection.Children.Add(move, new GameTreeNode()
+            GameTreeNode child = new GameTreeNode()
             {
                 Parent = selection,
                 Move = move,
-                Children = new Dictionary<Move, GameTreeNode>()
-            });
+                Children = new Dictionary<Move, GameTreeNode>(),
+            };
+            child.Value = Evaluate(child, board);
+
+            selection.Children.Add(move, child);
         }
 
-        return selection;
+        if(selection.Children.Count > 0)
+            return selection.Children.First().Value;
+        else
+        {
+            Board.UndoMove(selection.Move);
+            return selection;
+        }
     }
 
-    protected GameTreeNode Simulation(GameTreeNode expansion, Board board)
+    protected GameTreeNode Simulation(GameTreeNode node, Board board)
     {
+        Board.MakeMove(node.Move);
+
         int result = 1;
         Stack<Move> moves = new Stack<Move>();
         while(true)
@@ -227,9 +178,12 @@ public class MonteCarlo
         {
             board.UndoMove(move);
         }
-        expansion.SimResult = result;
+        node.SimResult = result;
 
-        return expansion;
+
+        Board.UndoMove(node.Move);
+
+        return node;
     }
 
     protected void Backpropagate(GameTreeNode? node)
@@ -251,6 +205,54 @@ public class MonteCarlo
 
     }
 
+    protected static double Sigmoid(double value)
+    {
+        return 1.0 / (1 + Math.Pow(Math.E, -value));
+    }
+
+    protected int Evaluate(GameTreeNode node, Board board)
+    {
+        int valueFlipper = Board.IsWhiteToMove ? 1 : -1;
+        board.MakeMove(node.Move);
+
+        if(board.IsInCheckmate())
+        {
+            board.UndoMove(node.Move);
+            return int.MaxValue;
+        }
+        if(board.IsDraw())
+        {
+            board.UndoMove(node.Move);
+            return 0;
+        }
+
+        int value = 0;
+
+        Stack<Move> rewindCaptures = new Stack<Move>();
+        Move[] movesWithCaptures = board.GetLegalMoves(true);
+        while(movesWithCaptures.Length > 0)
+        {
+            Move leastValueableCapture = movesWithCaptures.OrderBy(move => move.MovePieceType - move.CapturePieceType).First();
+            board.MakeMove(leastValueableCapture);
+            rewindCaptures.Push(leastValueableCapture);
+            movesWithCaptures = board.GetLegalMoves(true);
+        }
+
+        foreach(PieceList pieces in board.GetAllPieceLists())
+            value += pieces.Count * (pieces.IsWhitePieceList ? 1 : -1) * _values[(int)pieces.TypeOfPieceInList] * valueFlipper;
+
+        value += board.GetLegalMoves().Length;
+
+
+        foreach(Move rewindCapture in rewindCaptures)
+        {
+            board.UndoMove(rewindCapture);
+        }
+
+        board.UndoMove(node.Move);
+        return value;
+    }
+
     public Move GetBestMove()
     {
         return Root.Children.OrderByDescending(node => node.Value.Sims).First().Value.Move;
@@ -267,6 +269,8 @@ public class GameTreeNode
     public int Sims { get; set; } = 0;
 
     public int SimResult { get; set; }
+
+    public int Value { get; set; }
 
     public Dictionary<Move, GameTreeNode> Children { get; set; }
 }
