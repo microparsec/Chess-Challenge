@@ -15,7 +15,7 @@ public class MyBot : IChessBot
     public Move Think(Board board, Timer timer)
     {
         _mcts.Initialize(board);
-        _mcts.MCTS(timer, 500);
+        _mcts.MCTS(timer, 1000);
         return _mcts.GetBestMove();
     }
 }
@@ -102,7 +102,8 @@ public class MonteCarlo
             }   
         }
 
-        foreach(GameTreeNode child in Root.Children.Values.OrderByDescending(node => node.Sims))
+        Console.WriteLine("----------");
+        foreach(GameTreeNode child in Root.Children.Values.OrderByDescending(node => node.Sims).Take(10))
         {
             Console.WriteLine($"Move {child.Move}: Sims {child.Sims}, Wins: {child.Wins}, Value: {child.Value}");
         }
@@ -123,7 +124,8 @@ public class MonteCarlo
 
     protected static double CalculateUcb(GameTreeNode node, int totalSims)
     {
-        var value = node.Wins / Math.Max(1.0, node.Sims) + 20 * Sigmoid(0.00005 * node.Value * Math.Sqrt( Math.Log(totalSims) / Math.Max(0.00000000001, node.Sims)));
+        double alpha = 0.4;
+        var value = (1-alpha) * node.Wins / Math.Max(1.0, node.Sims) + alpha * Sigmoid(node.Value / 100) + 0.1 * Math.Sqrt( Math.Log(totalSims) / Math.Max(0.000000001, node.Sims));
         return value;
     }
 
@@ -197,6 +199,13 @@ public class MonteCarlo
                 node.Wins += 1;
             if(opponent == 0 && result == 1)
                 node.Wins += 1;
+
+            if(node.Children.Count > 0)
+            {
+                var theirMax = node.Children.Values.MaxBy(node => node.Value);
+                if(theirMax.Children.Count > 0)
+                    node.Value = theirMax.Children.Values.Max(node => node.Value);
+            }
             node = node.Parent;
 
             if(opponent == 0) opponent = 1;
@@ -218,7 +227,7 @@ public class MonteCarlo
         if(board.IsInCheckmate())
         {
             board.UndoMove(node.Move);
-            return int.MaxValue;
+            return valueFlipper * int.MaxValue;
         }
         if(board.IsDraw())
         {
@@ -228,26 +237,11 @@ public class MonteCarlo
 
         int value = 0;
 
-        Stack<Move> rewindCaptures = new Stack<Move>();
-        Move[] movesWithCaptures = board.GetLegalMoves(true);
-        while(movesWithCaptures.Length > 0)
-        {
-            Move leastValueableCapture = movesWithCaptures.OrderBy(move => move.MovePieceType - move.CapturePieceType).First();
-            board.MakeMove(leastValueableCapture);
-            rewindCaptures.Push(leastValueableCapture);
-            movesWithCaptures = board.GetLegalMoves(true);
-        }
-
         foreach(PieceList pieces in board.GetAllPieceLists())
             value += pieces.Count * (pieces.IsWhitePieceList ? 1 : -1) * _values[(int)pieces.TypeOfPieceInList] * valueFlipper;
 
         value += board.GetLegalMoves().Length;
-
-
-        foreach(Move rewindCapture in rewindCaptures)
-        {
-            board.UndoMove(rewindCapture);
-        }
+        value += 3 * board.GetLegalMoves(true).Length;
 
         board.UndoMove(node.Move);
         return value;
@@ -255,7 +249,7 @@ public class MonteCarlo
 
     public Move GetBestMove()
     {
-        return Root.Children.OrderByDescending(node => node.Value.Sims).First().Value.Move;
+        return Root.Children.MaxBy(node => node.Value.Sims).Value.Move;
     }
 }
 
